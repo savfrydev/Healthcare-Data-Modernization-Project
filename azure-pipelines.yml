@@ -1,32 +1,32 @@
+# azure-pipelines.yml
 trigger:
   branches:
     include:
       - main
 
+# ====== Variables you can tweak (or move to DevOps Variables UI) ======
 variables:
   location: 'eastus'
-  tf_state_rg: 'rg-tfstate-health-demo'
-  tf_state_sa: 'tfstatehealthdemo'            # <= must be 3-24 lowercase letters/numbers only, globally unique
-  tf_state_container: 'tfstate'               # <= container name
   project_rg: 'rg-health-demo'
-  app_name: 'func-health-1234567'             # <= must be globally unique
-  enable_networking: 'true'
+  app_name: 'func-health-1234567'     # must be globally unique
+  enable_networking: 'false'          # 'true' or 'false'
   tag_environment: 'Dev'
   tag_owner: 'Savannah Fry'
   tag_costcenter: 'HCARE-POC'
-  governance_mode: 'audit'
+  governance_mode: 'audit'            # 'audit' or 'deny'
 
 stages:
-# ------------------ PLAN ------------------
-- stage: Terraform_Plan
-  displayName: 'Terraform: validate & plan'
+- stage: Plan_Approve_Apply_And_Deploy
+  displayName: 'Plan → Approve → Apply → Deploy'
   jobs:
-  - job: plan
+  - job: all_in_one
+    displayName: 'Terraform (local state) + Deploy Function'
     pool:
       vmImage: 'ubuntu-latest'
     steps:
     - checkout: self
 
+    # --- Install Terraform (no marketplace dependency) ---
     - task: AzureCLI@2
       displayName: 'Install Terraform 1.7.5'
       inputs:
@@ -35,59 +35,37 @@ stages:
         scriptLocation: inlineScript
         inlineScript: |
           set -euxo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y unzip curl
-          curl -sSLo /tmp/terraform.zip https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip
-          sudo unzip -o /tmp/terraform.zip -d /usr/local/bin
+          if ! command -v terraform >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y unzip curl
+            curl -sSLo /tmp/terraform.zip https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip
+            sudo unzip -o /tmp/terraform.zip -d /usr/local/bin
+          fi
           terraform -version
 
+    # --- Terraform init/validate/plan (LOCAL STATE) ---
     - task: AzureCLI@2
-      displayName: 'Ensure backend RG/SA/container exist'
+      displayName: 'Terraform init/validate/plan (local state)'
       inputs:
         azureSubscription: 'sc-azure-portfolio'
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
           set -euxo pipefail
-          az group create -n "$(tf_state_rg)" -l "$(location)"
-          if ! az storage account show -g "$(tf_state_rg)" -n "$(tf_state_sa)" >/dev/null 2>&1; then
-            az storage account create -g "$(tf_state_rg)" -n "$(tf_state_sa)" -l "$(location)" --sku Standard_LRS --encryption-services blob
-          fi
-          az storage container create --name "$(tf_state_container)" --account-name "$(tf_state_sa)" --auth-mode login >/dev/null
 
-    - task: AzureCLI@2
-      displayName: 'Terraform init/validate/plan'
-      inputs:
-        azureSubscription: 'sc-azure-portfolio'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -euxo pipefail
           cd infra
 
-          cat > backend.tf <<'EOF'
-          terraform {
-            required_version = ">= 1.6"
-
-           }
-          backend "azurerm" {}
-          }
-
-          provider "azurerm" {
-            features {}
-          }
-          EOF
-
+          # ensure formatting
           terraform fmt -recursive
-          terraform init \
-            -backend-config="resource_group_name=$(tf_state_rg)" \
-            -backend-config="storage_account_name=$(tf_state_sa)" \
-            -backend-config="container_name=$(tf_state_container)" \
-            -backend-config="key=$(app_name).tfstate"
-          
+
+          # init WITHOUT any backend (local state)
+          terraform init -input=false
+
+          # validate
           terraform validate
 
-          terraform plan -out tfplan \
+          # plan (store plan file locally in this same workspace)
+          terraform plan -out=tfplan \
             -var "location=$(location)" \
             -var "project_rg=$(project_rg)" \
             -var "app_name=$(app_name)" \
@@ -97,71 +75,19 @@ stages:
             -var "tag_costcenter=$(tag_costcenter)" \
             -var "governance_mode=$(governance_mode)"
 
-          # move plan to staging for artifact publish
-          mkdir -p "$(Build.ArtifactStagingDirectory)"
-          cp tfplan "$(Build.ArtifactStagingDirectory)/tfplan"
-
-    - task: PublishBuildArtifacts@1
-      displayName: 'Publish plan artifact'
+    # --- Terraform apply (uses same working dir & local state/plan) ---
+    - task: AzureCLI@2
+      displayName: 'Terraform apply (local state)'
       inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-        ArtifactName: 'plan'
+        azureSubscription: 'sc-azure-portfolio'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euxo pipefail
+          cd infra
+          terraform apply -auto-approve tfplan
 
-# ------------------ APPLY ------------------
-- stage: Terraform_Apply
-  displayName: 'Terraform: apply with approval'
-  dependsOn: Terraform_Plan
-  jobs:
-  - deployment: apply
-    environment: 'manual-approval'   # create once; gate this env with approval in DevOps
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - checkout: self
-          - task: DownloadBuildArtifacts@0
-            inputs:
-              buildType: 'current'
-              downloadType: 'single'
-              artifactName: 'plan'
-              downloadPath: '$(Pipeline.Workspace)'
-
-          - task: AzureCLI@2
-            displayName: 'Terraform apply'
-            inputs:
-              azureSubscription: 'sc-azure-portfolio'
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                set -euxo pipefail
-                cd infra
-                # backend must match exactly as in plan stage
-                cat > backend.tf <<'EOF'
-                terraform {
-                  required_version = ">= 1.6"
-                  }
-                  backend "azurerm" {}
-                }
-                EOF
-
-                terraform init \
-                  -backend-config="resource_group_name=$(tf_state_rg)" \
-                  -backend-config="storage_account_name=$(tf_state_sa)" \
-                  -backend-config="container_name=$(tf_state_container)" \
-                  -backend-config="key=$(app_name).tfstate"
-
-                terraform apply -auto-approve "$(Pipeline.Workspace)/plan/tfplan"
-
-# ------------------ DEPLOY FUNCTION ------------------
-- stage: Build_And_Deploy_Function
-  displayName: 'Zip & Deploy Azure Function'
-  dependsOn: Terraform_Apply
-  jobs:
-  - job: deploy
-    pool:
-      vmImage: 'ubuntu-latest'
-    steps:
-    - checkout: self
+    # --- Zip the Function App contents ---
     - task: ArchiveFiles@2
       displayName: 'Zip function app'
       inputs:
@@ -171,14 +97,16 @@ stages:
         archiveFile: '$(Build.ArtifactStagingDirectory)/app.zip'
         replaceExistingArchive: true
 
+    # --- Optional: publish artifact (nice for debugging) ---
     - task: PublishBuildArtifacts@1
-      displayName: 'Publish app.zip'
+      displayName: 'Publish app.zip artifact'
       inputs:
         PathtoPublish: '$(Build.ArtifactStagingDirectory)/app.zip'
         ArtifactName: 'drop'
 
+    # --- Zip deploy to the Function App ---
     - task: AzureCLI@2
-      displayName: 'Zip deploy to Function App'
+      displayName: 'Zip deploy to Azure Function'
       inputs:
         azureSubscription: 'sc-azure-portfolio'
         scriptType: bash
