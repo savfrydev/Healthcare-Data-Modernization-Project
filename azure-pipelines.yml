@@ -1,117 +1,233 @@
----
-## azure-pipelines.yml
-
 trigger:
   branches:
-   include:
-     - main
+    include:
+      - main
 
 variables:
+  location: 'eastus'
   tf_state_rg: 'rg-tfstate-health-demo'
-  tf_state_sa: 'tf_state_health-demo'
+  tf_state_sa: 'sttfstatehealthdemo'
   tf_state_container: 'tfstatehealthdemo'
   project_rg: 'rg-health-demo'
   app_name: 'func-health-1234567'
-  enable_networking: 'true' # 'true' to deploy VNet + Private Endpoint
+  enable_networking: 'true'
   tag_environment: 'Dev'
   tag_owner: 'Savannah Fry'
   tag_costcenter: 'HCARE-POC'
-  governance_mode: 'audit' # 'audit' or 'deny'
+  governance_mode: 'audit'
 
 stages:
-  - stage: Terraform_Validate_Plan
-    displayName: 'Terraform: validate & plan'
-    jobs:
-      - job: plan
-        pool:
-          vmImage: 'ubuntu-latest'
-        steps:
-          - checkout: self
-          - task: AzureCLI@2
-            displayName: 'Ensure backend RG/SA/container exist (idempotent)'
-            inputs:
-              azureSubscription: 'sc-azure-portfolio'
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                set -euo pipefail
-                az group create -n ${tf_state_rg} -l ${location}
-                if ! az storage account show -g ${tf_state_rg} -n ${tf_state_sa} >/dev/null 2>&1; then
-                  az storage account create -g ${tf_state_rg} -n ${tf_state_sa} -l ${location} --sku Standard_LRS --encryption-services blob
-                fi
-                az storage container create \
-                 --name ${tf_state_container} \
-                 --account-name ${tf_state_sa} \
-                 --auth-mode login >/dev/null
-          - task: TerraformInstaller@1
-            displayName: 'Install Terraform 1.7.x'
-            inputs:
-              terraformVersion: '1.7.5'
-          - task: AzureCLI@2
-            displayName: 'Terraform init/validate/plan'
-            inputs:
-              azureSubscription: 'sc-azure-portfolio'
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                set -euo pipefail
-                cd infra
-                cat > backend.tf <<EOF
-                terraform {
-                  required_version = ">= 1.6"
-                  package: '$(Build.ArtifactStagingDirectory)/app.zip'
-                  resource_group_name = "${project_rg}"
-                  scriptLocation: inlineScript
-                  inlineScript: |
-                    set -euo pipefail
-                    cd infra
-                    terraform apply -auto-approve tfplan
-  - stage: KeyVault_Demo
-    displayName: 'Key Vault integration (pipeline demo)'
-    dependsOn: Terraform_Apply
-    condition: succeeded()
-    jobs:
-    - job: kv
-      pool:
-        vmImage: ubuntu-latest
-      steps:
-       - task: AzureKeyVault@2
-         displayName: 'Fetch demo secret from Key Vault'
-         inputs:
-           azureSubscription: 'sc-azure-portfolio'
-           KeyVaultName: 'kv-$(app_name)'
-           SecretsFilter: 'demo-secret'
-           RunAsPreJob: false
-       - script: |
-           echo "Key Vault secret pulled into pipeline as a masked variable."
-         displayName: "Show masked secret usage"
+- stage: Terraform_Plan
+  displayName: 'Terraform: init, validate, plan'
+  jobs:
+  - job: plan
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
 
-  - stage: Build_And_Deploy_Function
-    displayName: 'Build & Deploy Azure Function'
-    dependsOn: KeyVault_Demo
-    condition: succeeded()
-    jobs:
-      - job: deploy
-        pool:
-          vmImage: 'ubuntu-latest'
-        steps:
-         - checkout: self
-         - task: ArchiveFiles@2
-           displayName: 'Zip function app'
-           inputs:
-             rootFolderOrFile: 'app'
-             includeRootFolder: false
-             archiveType: 'zip'
-             archiveFile: '$(Build.ArtifactStagingDirectory)/app.zip'
-             replaceExistingArchive: true
-         - task: PublishBuildArtifacts@1
-           inputs:
-             PathtoPublish: '$(Build.ArtifactStagingDirectory)/app.zip'
-             ArtifactName: 'drop'
-         - task: AzureWebApp@1
-           displayName: 'Deploy Function App (zip deploy)'
-           inputs:
-             azureSubscription: 'sc-azure-portfolio'
-             appType: 'functionAppLinux'
-             appName: '$(app_name)'
-             package: '$(Build.ArtifactStagingDirectory)/app.zip'
+    - task: AzureCLI@2
+      displayName: 'Ensure TF state RG/SA/container (idempotent)'
+      inputs:
+        azureSubscription: 'sc-azure-portfolio'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          az group create -n "$(tf_state_rg)" -l "$(location)"
+          if ! az storage account show -g "$(tf_state_rg)" -n "$(tf_state_sa)" >/dev/null 2>&1; then
+            az storage account create -g "$(tf_state_rg)" -n "$(tf_state_sa)" -l "$(location)" --sku Standard_LRS --encryption-services blob
+          fi
+          az storage container create \
+            --name "$(tf_state_container)" \
+            --account-name "$(tf_state_sa)" \
+            --auth-mode login >/dev/null
+
+    # Install Terraform
+    - task: Bash@3
+      displayName: 'Install Terraform'
+      inputs:
+        targetType: 'inline'
+        script: |
+          set -euo pipefail
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/hashicorp.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
+            sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt-get update
+          sudo apt-get install -y terraform
+
+    - task: AzureCLI@2
+      displayName: 'Terraform init/validate/plan'
+      inputs:
+        azureSubscription: 'sc-azure-portfolio'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          terraform -version
+          cd infra
+
+          cat > backend.tf <<'EOF'
+          terraform {
+            backend "azurerm" {}
+            required_version = ">= 1.6"
+            required_providers {
+              azurerm = {
+                source  = "hashicorp/azurerm"
+                version = "~> 3.114"
+              }
+            }
+          }
+          EOF
+
+          terraform init \
+            -backend-config="resource_group_name=$(tf_state_rg)" \
+            -backend-config="storage_account_name=$(tf_state_sa)" \
+            -backend-config="container_name=$(tf_state_container)" \
+            -backend-config="key=$(app_name).tfstate"
+
+          terraform fmt -check
+          terraform validate
+
+          terraform plan \
+            -var "location=$(location)" \
+            -var "project_rg=$(project_rg)" \
+            -var "app_name=$(app_name)" \
+            -var "enable_networking=$(enable_networking)" \
+            -var "tag_environment=$(tag_environment)" \
+            -var "tag_owner=$(tag_owner)" \
+            -var "tag_costcenter=$(tag_costcenter)" \
+            -var "governance_mode=$(governance_mode)" \
+            -out tfplan
+
+          terraform show -no-color tfplan > ../tfplan.txt
+
+    - publish: tfplan.txt
+      artifact: tfplan
+
+- stage: Terraform_Apply
+  displayName: 'Terraform: apply'
+  dependsOn: Terraform_Plan
+  jobs:
+  - job: apply
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+    - download: current
+      artifact: tfplan
+
+    # Install Terraform again in this job
+    - task: Bash@3
+      displayName: 'Install Terraform'
+      inputs:
+        targetType: 'inline'
+        script: |
+          set -euo pipefail
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/hashicorp.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
+            sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt-get update
+          sudo apt-get install -y terraform
+
+    - task: AzureCLI@2
+      displayName: 'Terraform re-init & apply'
+      inputs:
+        azureSubscription: 'sc-azure-portfolio'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          terraform -version
+          cd infra
+
+          cat > backend.tf <<'EOF'
+          terraform {
+            backend "azurerm" {}
+            required_version = ">= 1.6"
+            required_providers {
+              azurerm = {
+                source  = "hashicorp/azurerm"
+                version = "~> 3.114"
+              }
+            }
+          }
+          EOF
+
+          terraform init \
+            -backend-config="resource_group_name=$(tf_state_rg)" \
+            -backend-config="storage_account_name=$(tf_state_sa)" \
+            -backend-config="container_name=$(tf_state_container)" \
+            -backend-config="key=$(app_name).tfstate"
+
+          terraform plan \
+            -var "location=$(location)" \
+            -var "project_rg=$(project_rg)" \
+            -var "app_name=$(app_name)" \
+            -var "enable_networking=$(enable_networking)" \
+            -var "tag_environment=$(tag_environment)" \
+            -var "tag_owner=$(tag_owner)" \
+            -var "tag_costcenter=$(tag_costcenter)" \
+            -var "governance_mode=$(governance_mode)" \
+            -out tfplan
+
+          terraform apply -auto-approve tfplan
+
+- stage: KeyVault_Demo
+  displayName: 'Key Vault integration (pipeline demo)'
+  dependsOn: Terraform_Apply
+  condition: succeeded()
+  jobs:
+  - job: kv
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: AzureKeyVault@2
+      displayName: 'Fetch demo secret from Key Vault'
+      inputs:
+        azureSubscription: 'sc-azure-portfolio'
+        KeyVaultName: 'kv-$(app_name)'
+        SecretsFilter: 'demo-secret'
+        RunAsPreJob: false
+    - script: |
+        echo "Key Vault secret pulled (value masked)."
+      displayName: "Show masked secret usage"
+
+- stage: Build_And_Deploy_Function
+  displayName: 'Build & Deploy Azure Function'
+  dependsOn: KeyVault_Demo
+  condition: succeeded()
+  jobs:
+  - job: deploy
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+    - task: ArchiveFiles@2
+      displayName: 'Zip function app'
+      inputs:
+        rootFolderOrFile: 'app'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/app.zip'
+        replaceExistingArchive: true
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/app.zip'
+        ArtifactName: 'drop'
+
+    - task: AzureCLI@2
+      displayName: 'Zip deploy to Function App'
+      inputs:
+        azureSubscription: 'sc-azure-portfolio'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          echo "Deploying $(Build.ArtifactStagingDirectory)/app.zip to $(app_name)"
+          az functionapp deployment source config-zip \
+           --resource-group "$(project_rg)" \
+           --name "$(app_name)" \
+           --src "$(Build.ArtifactStagingDirectory)/app.zip"

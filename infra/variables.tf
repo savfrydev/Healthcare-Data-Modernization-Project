@@ -1,16 +1,45 @@
-variable "location"          { type = string, default = "eastus" }
-variable "project_rg"        { type = string }
-variable "app_name"          { type = string }
-variable "enable_networking" { type = bool,  default = false }
+variable "location" {
+  type    = string
+  default = "eastus"
+}
 
-variable "tag_environment" { type = string, default = "Dev" }
-variable "tag_owner"       { type = string, default = "Owner" }
-variable "tag_costcenter"  { type = string, default = "POC" }
+variable "project_rg" {
+  type = string
+}
+
+variable "app_name" {
+  type = string
+}
+
+variable "enable_networking" {
+  type    = bool
+  default = false
+}
+
+variable "tag_environment" {
+  type    = string
+  default = "Dev"
+}
+
+variable "tag_owner" {
+  type    = string
+  default = "Owner"
+}
+
+variable "tag_costcenter" {
+  type    = string
+  default = "POC"
+}
 
 variable "governance_mode" {
   type        = string
   description = "'audit' or 'deny'"
   default     = "audit"
+
+  validation {
+    condition     = contains(["audit", "deny"], var.governance_mode)
+    error_message = "governance_mode must be 'audit' or 'deny'."
+  }
 }
 
 locals {
