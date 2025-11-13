@@ -3,58 +3,115 @@
 
 trigger:
   branches:
-include:
-- main
-
+   include:
+     - main
 
 variables:
-tf_state_rg: 'rg-tfstate-portfolio'
-tf_state_sa: 'sttfstate1234567'
-tf_state_container: 'tfstate'
-project_rg: 'rg-health-demo'
-app_name: 'func-health-1234567'
-enable_networking: 'false' # 'true' to deploy VNet + Private Endpoint
-
+  tf_state_rg: 'rg-tfstate-health-demo'
+  tf_state_sa: 'tf_state_health-demo'
+  tf_state_container: 'tfstatehealthdemo'
+  project_rg: 'rg-health-demo'
+  app_name: 'func-health-1234567'
+  enable_networking: 'true' # 'true' to deploy VNet + Private Endpoint
+  tag_environment: 'Dev'
+  tag_owner: 'Savannah Fry'
+  tag_costcenter: 'HCARE-POC'
+  governance_mode: 'audit' # 'audit' or 'deny'
 
 stages:
-- stage: Terraform_Validate_Plan
-displayName: 'Terraform: validate & plan'
-jobs:
-- job: plan
-pool:
-vmImage: 'ubuntu-latest'
-steps:
-- checkout: self
-- task: AzureCLI@2
-displayName: 'Ensure backend RG/SA/container exist (idempotent)'
-inputs:
-azureSubscription: 'sc-azure-portfolio'
-scriptType: bash
-scriptLocation: inlineScript
-inlineScript: |
-set -euo pipefail
-az group create -n ${tf_state_rg} -l ${location}
-if ! az storage account show -g ${tf_state_rg} -n ${tf_state_sa} >/dev/null 2>&1; then
-az storage account create -g ${tf_state_rg} -n ${tf_state_sa} -l ${location} --sku Standard_LRS --encryption-services blob
-fi
-az storage container create \
---name ${tf_state_container} \
---account-name ${tf_state_sa} \
---auth-mode login >/dev/null
-- task: TerraformInstaller@1
-displayName: 'Install Terraform 1.7.x'
-inputs:
-terraformVersion: '1.7.5'
-- task: AzureCLI@2
-displayName: 'Terraform init/validate/plan'
-inputs:
-azureSubscription: 'sc-azure-portfolio'
-scriptType: bash
-scriptLocation: inlineScript
-inlineScript: |
-set -euo pipefail
-cd infra
-cat > backend.tf <<EOF
-terraform {
-required_version = ">= 1.6"
-package: '$(Build.ArtifactStagingDirectory)/app.zip'
+  - stage: Terraform_Validate_Plan
+    displayName: 'Terraform: validate & plan'
+    jobs:
+      - job: plan
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          - task: AzureCLI@2
+            displayName: 'Ensure backend RG/SA/container exist (idempotent)'
+            inputs:
+              azureSubscription: 'sc-azure-portfolio'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                az group create -n ${tf_state_rg} -l ${location}
+                if ! az storage account show -g ${tf_state_rg} -n ${tf_state_sa} >/dev/null 2>&1; then
+                  az storage account create -g ${tf_state_rg} -n ${tf_state_sa} -l ${location} --sku Standard_LRS --encryption-services blob
+                fi
+                az storage container create \
+                 --name ${tf_state_container} \
+                 --account-name ${tf_state_sa} \
+                 --auth-mode login >/dev/null
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform 1.7.x'
+            inputs:
+              terraformVersion: '1.7.5'
+          - task: AzureCLI@2
+            displayName: 'Terraform init/validate/plan'
+            inputs:
+              azureSubscription: 'sc-azure-portfolio'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                cd infra
+                cat > backend.tf <<EOF
+                terraform {
+                  required_version = ">= 1.6"
+                  package: '$(Build.ArtifactStagingDirectory)/app.zip'
+                  resource_group_name = "${project_rg}"
+                  scriptLocation: inlineScript
+                  inlineScript: |
+                    set -euo pipefail
+                    cd infra
+                    terraform apply -auto-approve tfplan
+  - stage: KeyVault_Demo
+    displayName: 'Key Vault integration (pipeline demo)'
+    dependsOn: Terraform_Apply
+    condition: succeeded()
+    jobs:
+    - job: kv
+      pool:
+        vmImage: ubuntu-latest
+      steps:
+       - task: AzureKeyVault@2
+         displayName: 'Fetch demo secret from Key Vault'
+         inputs:
+           azureSubscription: 'sc-azure-portfolio'
+           KeyVaultName: 'kv-$(app_name)'
+           SecretsFilter: 'demo-secret'
+           RunAsPreJob: false
+       - script: |
+           echo "Key Vault secret pulled into pipeline as a masked variable."
+         displayName: "Show masked secret usage"
+
+  - stage: Build_And_Deploy_Function
+    displayName: 'Build & Deploy Azure Function'
+    dependsOn: KeyVault_Demo
+    condition: succeeded()
+    jobs:
+      - job: deploy
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+         - checkout: self
+         - task: ArchiveFiles@2
+           displayName: 'Zip function app'
+           inputs:
+             rootFolderOrFile: 'app'
+             includeRootFolder: false
+             archiveType: 'zip'
+             archiveFile: '$(Build.ArtifactStagingDirectory)/app.zip'
+             replaceExistingArchive: true
+         - task: PublishBuildArtifacts@1
+           inputs:
+             PathtoPublish: '$(Build.ArtifactStagingDirectory)/app.zip'
+             ArtifactName: 'drop'
+         - task: AzureWebApp@1
+           displayName: 'Deploy Function App (zip deploy)'
+           inputs:
+             azureSubscription: 'sc-azure-portfolio'
+             appType: 'functionAppLinux'
+             appName: '$(app_name)'
+             package: '$(Build.ArtifactStagingDirectory)/app.zip'

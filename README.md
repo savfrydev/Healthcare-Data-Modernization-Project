@@ -11,6 +11,10 @@
 - **Key Vault** (stores a demo secret; Function reads it via KV reference)
 - Python Azure Function App (Consumption) with an HTTP trigger
 - **(Optional) Networking**: VNet + subnets + Private Endpoint for Storage (toggle)
+- **Tagging** on every resource (Environment, Owner, CostCenter)
+- **Governance** with Azure Policy at the RG scope:
+- Require tags (deny if missing or empty)
+- Audit public network access on Storage (configurable to Deny)
 
 
 ## Prereqs
@@ -25,8 +29,13 @@
 git clone https://github.com/savfrydev Healthcare-Data-Modernization-Project.git
 cd Healthcare-Data-Modernization-Project
 
-
 # (Optional) local test of infra
 cd infra
 terraform init
-terraform plan -var "location=eastus" -var "enable_networking=false"
+terraform plan \
+-var "location=eastus" \
+-var "enable_networking=false" \
+-var "tag_environment=Dev" \
+-var "tag_owner=Savannah" \
+-var "tag_costcenter=HCARE-POC" \
+-var "governance_mode=audit"
