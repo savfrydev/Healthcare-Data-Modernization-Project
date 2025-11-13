@@ -1,113 +1,65 @@
-# azure-pipelines.yml
 trigger:
   branches:
-    include:
-      - main
+    include: [ main ]
 
-# ===== Vars you can tweak (or set in DevOps UI) =====
 variables:
   location: 'eastus'
-  project_rg: 'rg-health-demo'
-  app_name: 'func-health-1234567'     # must be globally unique
-  enable_networking: 'false'          # 'true' or 'false'
+  project_rg: 'rg-healthcare-demo'
   tag_environment: 'Dev'
   tag_owner: 'Savannah Fry'
-  tag_costcenter: 'HCARE-POC'
-  governance_mode: 'audit'            # 'audit' or 'deny'
+  tag_costcenter: 'PORTFOLIO'
 
-stages:
-- stage: Plan_Apply_And_Deploy
-  displayName: 'Plan → Apply → Deploy (local state)'
-  jobs:
-  - job: all_in_one
-    displayName: 'Terraform (local) + Deploy Function'
-    pool:
-      vmImage: 'ubuntu-latest'
-    steps:
-    - checkout: self
+pool:
+  vmImage: 'ubuntu-latest'
 
-    # Install Terraform without marketplace dependency
-    - task: AzureCLI@2
-      displayName: 'Install Terraform 1.7.5'
-      inputs:
-        azureSubscription: 'sc-azure-portfolio'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -euxo pipefail
-          if ! command -v terraform >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y unzip curl
-            curl -sSLo /tmp/terraform.zip https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip
-            sudo unzip -o /tmp/terraform.zip -d /usr/local/bin
-          fi
-          terraform -version
+steps:
+- checkout: self
 
-    # Terraform init/validate/plan (LOCAL STATE)
-    - task: AzureCLI@2
-      displayName: 'Terraform init/validate/plan (local state)'
-      inputs:
-        azureSubscription: 'sc-azure-portfolio'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -euxo pipefail
+# Install Terraform without marketplace dependencies
+- task: AzureCLI@2
+  displayName: 'Install Terraform 1.7.5'
+  inputs:
+    azureSubscription: 'sc-azure-portfolio'
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      set -euxo pipefail
+      if ! command -v terraform >/dev/null 2>&1; then
+        sudo apt-get update -y
+        sudo apt-get install -y unzip curl
+        curl -sSLo /tmp/terraform.zip https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip
+        sudo unzip -o /tmp/terraform.zip -d /usr/local/bin
+      fi
+      terraform -version
 
-          cd infra
+# Init/Validate/Plan (LOCAL state)
+- task: AzureCLI@2
+  displayName: 'Terraform init/validate/plan (local)'
+  inputs:
+    azureSubscription: 'sc-azure-portfolio'
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      set -euxo pipefail
+      cd infra
+      terraform fmt -recursive
+      terraform init -input=false
+      terraform validate
+      terraform plan -out=tfplan \
+        -var "location=$(location)" \
+        -var "project_rg=$(project_rg)" \
+        -var "tag_environment=$(tag_environment)" \
+        -var "tag_owner=$(tag_owner)" \
+        -var "tag_costcenter=$(tag_costcenter)"
 
-          terraform fmt -recursive
-          terraform init -input=false
-          terraform validate
-
-          terraform plan -out=tfplan \
-            -var "location=$(location)" \
-            -var "project_rg=$(project_rg)" \
-            -var "app_name=$(app_name)" \
-            -var "enable_networking=$(enable_networking)" \
-            -var "tag_environment=$(tag_environment)" \
-            -var "tag_owner=$(tag_owner)" \
-            -var "tag_costcenter=$(tag_costcenter)" \
-            -var "governance_mode=$(governance_mode)"
-
-    # Terraform apply (same workspace → same local state)
-    - task: AzureCLI@2
-      displayName: 'Terraform apply (local state)'
-      inputs:
-        azureSubscription: 'sc-azure-portfolio'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -euxo pipefail
-          cd infra
-          terraform apply -auto-approve tfplan
-
-    # Zip the Function app
-    - task: ArchiveFiles@2
-      displayName: 'Zip function app'
-      inputs:
-        rootFolderOrFile: 'app'
-        includeRootFolder: false
-        archiveType: 'zip'
-        archiveFile: '$(Build.ArtifactStagingDirectory)/app.zip'
-        replaceExistingArchive: true
-
-    # Optional: publish artifact for debugging
-    - task: PublishBuildArtifacts@1
-      displayName: 'Publish app.zip artifact'
-      inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)/app.zip'
-        ArtifactName: 'drop'
-
-    # Zip deploy to the Function App
-    - task: AzureCLI@2
-      displayName: 'Zip deploy to Azure Function'
-      inputs:
-        azureSubscription: 'sc-azure-portfolio'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -euxo pipefail
-          az functionapp deployment source config-zip \
-            --resource-group "$(project_rg)" \
-            --name "$(app_name)" \
-            --src "$(Build.ArtifactStagingDirectory)/app.zip"
+# Apply
+- task: AzureCLI@2
+  displayName: 'Terraform apply (local)'
+  inputs:
+    azureSubscription: 'sc-azure-portfolio'
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      set -euxo pipefail
+      cd infra
+      terraform apply -auto-approve tfplan
