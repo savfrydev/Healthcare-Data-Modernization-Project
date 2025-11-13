@@ -149,13 +149,6 @@ resource "azurerm_policy_definition" "require_tags" {
   })
 }
 
-resource "azurerm_policy_assignment" "require_tags_rg" {
-  name                 = "pa-require-tags-${var.project_rg}"
-  scope                = azurerm_resource_group.rg.id
-  policy_definition_id = azurerm_policy_definition.require_tags.id
-  display_name         = "Require Tags (RG scope)"
-}
-
 # Audit or Deny storage accounts with public blobs enabled
 resource "azurerm_policy_definition" "storage_public_access" {
   name         = "pd-storage-public-${var.project_rg}"
@@ -172,13 +165,6 @@ resource "azurerm_policy_definition" "storage_public_access" {
     }
     then = { effect = local.policy_effect_storage_public }
   })
-}
-
-resource "azurerm_policy_assignment" "storage_public_access_rg" {
-  name                 = "pa-storage-public-${var.project_rg}"
-  scope                = azurerm_resource_group.rg.id
-  policy_definition_id = azurerm_policy_definition.storage_public_access.id
-  display_name         = "Audit/Deny Storage Public Access (RG scope)"
 }
 
 ########################
