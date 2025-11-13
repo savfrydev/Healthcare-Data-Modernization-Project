@@ -4,7 +4,7 @@ trigger:
     include:
       - main
 
-# ====== Variables you can tweak (or move to DevOps Variables UI) ======
+# ===== Vars you can tweak (or set in DevOps UI) =====
 variables:
   location: 'eastus'
   project_rg: 'rg-health-demo'
@@ -16,17 +16,17 @@ variables:
   governance_mode: 'audit'            # 'audit' or 'deny'
 
 stages:
-- stage: Plan_Approve_Apply_And_Deploy
-  displayName: 'Plan → Approve → Apply → Deploy'
+- stage: Plan_Apply_And_Deploy
+  displayName: 'Plan → Apply → Deploy (local state)'
   jobs:
   - job: all_in_one
-    displayName: 'Terraform (local state) + Deploy Function'
+    displayName: 'Terraform (local) + Deploy Function'
     pool:
       vmImage: 'ubuntu-latest'
     steps:
     - checkout: self
 
-    # --- Install Terraform (no marketplace dependency) ---
+    # Install Terraform without marketplace dependency
     - task: AzureCLI@2
       displayName: 'Install Terraform 1.7.5'
       inputs:
@@ -43,7 +43,7 @@ stages:
           fi
           terraform -version
 
-    # --- Terraform init/validate/plan (LOCAL STATE) ---
+    # Terraform init/validate/plan (LOCAL STATE)
     - task: AzureCLI@2
       displayName: 'Terraform init/validate/plan (local state)'
       inputs:
@@ -55,16 +55,10 @@ stages:
 
           cd infra
 
-          # ensure formatting
           terraform fmt -recursive
-
-          # init WITHOUT any backend (local state)
           terraform init -input=false
-
-          # validate
           terraform validate
 
-          # plan (store plan file locally in this same workspace)
           terraform plan -out=tfplan \
             -var "location=$(location)" \
             -var "project_rg=$(project_rg)" \
@@ -75,7 +69,7 @@ stages:
             -var "tag_costcenter=$(tag_costcenter)" \
             -var "governance_mode=$(governance_mode)"
 
-    # --- Terraform apply (uses same working dir & local state/plan) ---
+    # Terraform apply (same workspace → same local state)
     - task: AzureCLI@2
       displayName: 'Terraform apply (local state)'
       inputs:
@@ -87,7 +81,7 @@ stages:
           cd infra
           terraform apply -auto-approve tfplan
 
-    # --- Zip the Function App contents ---
+    # Zip the Function app
     - task: ArchiveFiles@2
       displayName: 'Zip function app'
       inputs:
@@ -97,14 +91,14 @@ stages:
         archiveFile: '$(Build.ArtifactStagingDirectory)/app.zip'
         replaceExistingArchive: true
 
-    # --- Optional: publish artifact (nice for debugging) ---
+    # Optional: publish artifact for debugging
     - task: PublishBuildArtifacts@1
       displayName: 'Publish app.zip artifact'
       inputs:
         PathtoPublish: '$(Build.ArtifactStagingDirectory)/app.zip'
         ArtifactName: 'drop'
 
-    # --- Zip deploy to the Function App ---
+    # Zip deploy to the Function App
     - task: AzureCLI@2
       displayName: 'Zip deploy to Azure Function'
       inputs:
