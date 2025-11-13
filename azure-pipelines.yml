@@ -68,8 +68,10 @@ stages:
           cat > backend.tf <<'EOF'
           terraform {
             required_version = ">= 1.6"
+
            }
           backend "azurerm" {}
+          }
 
           provider "azurerm" {
             features {}
