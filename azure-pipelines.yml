@@ -70,7 +70,6 @@ stages:
             required_version = ">= 1.6"
            }
           backend "azurerm" {}
-          }
 
           provider "azurerm" {
             features {}
