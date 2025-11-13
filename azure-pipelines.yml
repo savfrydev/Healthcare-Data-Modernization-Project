@@ -1,0 +1,60 @@
+---
+## azure-pipelines.yml
+
+trigger:
+  branches:
+include:
+- main
+
+
+variables:
+tf_state_rg: 'rg-tfstate-portfolio'
+tf_state_sa: 'sttfstate1234567'
+tf_state_container: 'tfstate'
+project_rg: 'rg-health-demo'
+app_name: 'func-health-1234567'
+enable_networking: 'false' # 'true' to deploy VNet + Private Endpoint
+
+
+stages:
+- stage: Terraform_Validate_Plan
+displayName: 'Terraform: validate & plan'
+jobs:
+- job: plan
+pool:
+vmImage: 'ubuntu-latest'
+steps:
+- checkout: self
+- task: AzureCLI@2
+displayName: 'Ensure backend RG/SA/container exist (idempotent)'
+inputs:
+azureSubscription: 'sc-azure-portfolio'
+scriptType: bash
+scriptLocation: inlineScript
+inlineScript: |
+set -euo pipefail
+az group create -n ${tf_state_rg} -l ${location}
+if ! az storage account show -g ${tf_state_rg} -n ${tf_state_sa} >/dev/null 2>&1; then
+az storage account create -g ${tf_state_rg} -n ${tf_state_sa} -l ${location} --sku Standard_LRS --encryption-services blob
+fi
+az storage container create \
+--name ${tf_state_container} \
+--account-name ${tf_state_sa} \
+--auth-mode login >/dev/null
+- task: TerraformInstaller@1
+displayName: 'Install Terraform 1.7.x'
+inputs:
+terraformVersion: '1.7.5'
+- task: AzureCLI@2
+displayName: 'Terraform init/validate/plan'
+inputs:
+azureSubscription: 'sc-azure-portfolio'
+scriptType: bash
+scriptLocation: inlineScript
+inlineScript: |
+set -euo pipefail
+cd infra
+cat > backend.tf <<EOF
+terraform {
+required_version = ">= 1.6"
+package: '$(Build.ArtifactStagingDirectory)/app.zip'
